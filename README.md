@@ -3,8 +3,9 @@
 Kubik is a fast, cross-platform desktop cockpit for Kubernetes clusters: a
 native Rust core (Tauri 2 + kube-rs) with a React interface. It connects with
 your own kubeconfig, streams live resource state, and covers the daily-driver
-tooling — YAML editing, logs, shells, port forwarding, Helm — without a local
-kubectl.
+tooling — YAML editing, logs, shells, port forwarding, Helm. All cluster
+traffic goes through the Kubernetes API; a local kubectl is not needed for
+browsing, editing or Helm — only for exec credential plugins (see below).
 
 ![Kubik](src-tauri/icons/128x128.png)
 
@@ -38,6 +39,36 @@ kubectl.
 - Optional: a local `helm` binary for the Helm views (auto-detected from PATH,
   common install locations or the login shell; a custom path can be pinned in
   Settings → Tools)
+- Optional: a local `kubectl` binary for **exec credential plugins**
+  (auto-detected the same way, pinnable in Settings → Tools)
+
+### When is a local kubectl needed?
+
+Only when your kubeconfig authenticates through an **exec credential plugin** —
+the `user.exec` block, which is how OIDC/SSO setups (Keycloak, Okta, Dex,
+`kubectl oidc-login`, aws/azure/gcp auth, …) distribute credentials:
+
+```yaml
+users:
+  - name: oidc-user
+    user:
+      exec:
+        command: kubectl
+        args: [oidc-login, get-token, --oidc-issuer-url=…]
+```
+
+Kubik runs that plugin itself whenever a token is needed:
+
+- On connect, the first access, and automatically **after every 401** — the
+  plugin is re-run with a fresh cache (kubelogin then opens the browser for
+  the login; after you sign in the cluster connects by itself)
+- Token refreshes and re-logins run `kubectl` from the resolved path —
+  no manual terminal work
+
+Every other flow — listing, watches, YAML editing, logs, shells, port
+forwarding, Helm — talks to the API server directly through kube-rs and
+needs **no kubectl at all**. If your kubeconfig uses client certificates,
+tokens or auth-provider blocks, kubectl is not used either.
 
 ### Run in development
 
@@ -131,6 +162,33 @@ the pipeline picks them up automatically and skips the steps when absent:
 
 Create the base64 on a machine that has the certificate:
 `base64 -i DeveloperID.p12 | pbcopy`.
+
+### Performance on Windows
+
+The macOS and Windows builds run the same Rust core, so a large gap between
+them usually comes from the Windows environment, not the app. The three
+most common causes, in order of impact:
+
+1. **Windows Defender real-time protection.** Every process spawn (exec
+   credential plugins run `kubectl` on connect) and every network buffer is
+   scanned. Add exclusions for:
+   - the install directory (`C:\Program Files\Kubik` or per-user
+     `%LOCALAPPDATA%\Kubik`)
+   - `kubectl.exe` itself
+   - the token-cache directory (`%USERPROFILE%\.kube`)
+   This is typically the single biggest win — 100–500 ms per spawn disappears.
+2. **OneDrive-synced kubeconfigs.** Files on `Desktop`/`Documents` are hydrated
+   and re-checked on every read; each connection reads the kubeconfig (and
+   re-reads it on mtime change). Keep kubeconfigs in a plain local folder,
+   e.g. `%USERPROFILE%\.kube\`.
+3. **Network path to the API server / proxy.** Compare the ping shown in the
+   debug panel (bug icon → Connection) between macOS and Windows: if Windows
+   shows a much higher ms, the difference is the network route (VPN/proxy),
+   not the client.
+
+If the pings are similar but tables render slowly, update the **WebView2
+Runtime** (`Settings → Apps → WebView2` or `evergreen.sd.microsoft.com`) —
+old runtimes have known rendering-performance issues.
 
 ### macOS Gatekeeper
 
